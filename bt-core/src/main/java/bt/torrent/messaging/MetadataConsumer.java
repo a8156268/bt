@@ -16,6 +16,7 @@
 
 package bt.torrent.messaging;
 
+import bt.event.EventSource;
 import bt.magnet.UtMetadata;
 import bt.metainfo.IMetadataService;
 import bt.metainfo.Torrent;
@@ -26,11 +27,19 @@ import bt.protocol.extended.ExtendedHandshake;
 import bt.runtime.Config;
 import bt.torrent.annotation.Consumes;
 import bt.torrent.annotation.Produces;
+import it.unimi.dsi.fastutil.ints.IntArrayFIFOQueue;
+import it.unimi.dsi.fastutil.ints.IntIterator;
+import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
+import it.unimi.dsi.fastutil.ints.IntPriorityQueue;
+import it.unimi.dsi.fastutil.ints.IntPriorityQueues;
+import it.unimi.dsi.fastutil.ints.IntSet;
+import it.unimi.dsi.fastutil.ints.IntSets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -44,12 +53,14 @@ public class MetadataConsumer {
     private static final Duration FIRST_BLOCK_ARRIVAL_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration WAIT_BEFORE_REREQUESTING_AFTER_REJECT = Duration.ofSeconds(10);
 
-    private final ConcurrentMap<Peer, Long> peersWithoutMetadata;
+    private static final int MAX_CONCURRENT_INDEX = 100;
 
+    private final ConcurrentMap<Peer, StateContext> states;
     private final Set<Peer> supportingPeers;
     private final ConcurrentMap<Peer, Long> requestedFirstPeers;
     private final Set<Peer> requestedAllPeers;
 
+    private volatile IntPriorityQueue blocksNeedRequest;
     private volatile ExchangedMetadata metadata;
 
     private final IMetadataService metadataService;
@@ -64,13 +75,14 @@ public class MetadataConsumer {
 
     public MetadataConsumer(IMetadataService metadataService,
                             TorrentId torrentId,
-                            Config config) {
-
-        this.peersWithoutMetadata = new ConcurrentHashMap<>();
+                            Config config,
+                            EventSource eventSource) {
 
         this.supportingPeers = ConcurrentHashMap.newKeySet();
         this.requestedFirstPeers = new ConcurrentHashMap<>();
         this.requestedAllPeers = ConcurrentHashMap.newKeySet();
+
+        this.states = new ConcurrentHashMap<>();
 
         this.metadataService = metadataService;
 
@@ -79,6 +91,11 @@ public class MetadataConsumer {
 
         this.metadataExchangeBlockSize = config.getMetadataExchangeBlockSize();
         this.metadataExchangeMaxSize = config.getMetadataExchangeMaxSize();
+
+        eventSource.onPeerDisconnected(torrentId, event -> {
+            Peer peer = event.getPeer();
+            removePeer(peer);
+        });
     }
 
     @Consumes
@@ -95,6 +112,7 @@ public class MetadataConsumer {
     public void consume(UtMetadata message, MessageContext context) {
         Peer peer = context.getPeer();
         // being lenient herer and not checking if the peer advertised ut_metadata support
+        StateContext stateContext = states.get(peer);
         switch (message.getType()) {
             case DATA: {
                 int totalSize = message.getTotalSize().get();
@@ -102,11 +120,18 @@ public class MetadataConsumer {
                     throw new IllegalStateException("Declared metadata size is too large: " + totalSize +
                             "; max allowed is " + metadataExchangeMaxSize);
                 }
+                if (stateContext != null) {
+                    stateContext.requestedIndexes.remove(message.getPieceIndex());
+                    if (stateContext.state != State.HAS_METADATA) {
+                        stateContext.state = State.HAS_METADATA;
+                    }
+                }
                 processMetadataBlock(message.getPieceIndex(), totalSize, message.getData().get());
             }
             break;
             case REJECT: {
-                peersWithoutMetadata.put(peer, System.currentTimeMillis());
+                stateContext.rejectedTime = System.currentTimeMillis();
+                stateContext.state = State.REJECTED;
             }
             break;
             default: {
@@ -117,7 +142,12 @@ public class MetadataConsumer {
 
     private void processMetadataBlock(int pieceIndex, int totalSize, byte[] data) {
         if (metadata == null) {
-            metadata = new ExchangedMetadata(totalSize, metadataExchangeBlockSize);
+            synchronized (this) {
+                if (metadata == null) {
+                    metadata = new ExchangedMetadata(totalSize, metadataExchangeBlockSize);
+                    blocksNeedRequest = createBlockIndexQueue(metadata.getBlockCount());
+                }
+            }
         }
 
         if (!metadata.isBlockPresent(pieceIndex)) {
@@ -137,6 +167,7 @@ public class MetadataConsumer {
                     if (fetchedTorrent != null) {
                         synchronized (torrent) {
                             torrent.set(fetchedTorrent);
+                            states.clear();
                             requestedFirstPeers.clear();
                             requestedAllPeers.clear();
                             torrent.notifyAll();
@@ -147,6 +178,8 @@ public class MetadataConsumer {
                     // restart the process
                     // TODO: terminate peer connections that the metadata was fetched from?
                     // or just try again with the others?
+                    states.clear();
+                    blocksNeedRequest = null;
                     metadata = null;
                 }
             }
@@ -161,29 +194,68 @@ public class MetadataConsumer {
         }
 
         Peer peer = context.getPeer();
-        if (supportingPeers.contains(peer)) {
-            if (peersWithoutMetadata.containsKey(peer)) {
-                if ((System.currentTimeMillis() - peersWithoutMetadata.get(peer)) >= WAIT_BEFORE_REREQUESTING_AFTER_REJECT.toMillis()) {
-                    peersWithoutMetadata.remove(peer);
+        if (!supportingPeers.contains(peer)) {
+            return;
+        }
+
+        StateContext stateContext = states.computeIfAbsent(peer, key -> new StateContext());
+        State state = stateContext.state;
+        switch (state) {
+            case INIT: {
+                messageConsumer.accept(UtMetadata.request(0));
+                stateContext.requestedFirstTime = System.currentTimeMillis();
+                stateContext.state = State.REQUESTED_FIRST;
+            }
+            break;
+            case REQUESTED_FIRST: {
+                long now = System.currentTimeMillis();
+                if (now - stateContext.requestedFirstTime > FIRST_BLOCK_ARRIVAL_TIMEOUT.toMillis()) {
+                    messageConsumer.accept(UtMetadata.request(0));
+                    stateContext.requestedFirstTime = now;
                 }
             }
-
-            if (!peersWithoutMetadata.containsKey(peer)) {
-                if (metadata == null) {
-                    if (!requestedFirstPeers.containsKey(peer) ||
-                            (System.currentTimeMillis() - requestedFirstPeers.get(peer) > FIRST_BLOCK_ARRIVAL_TIMEOUT.toMillis())) {
-                        requestedFirstPeers.put(peer, System.currentTimeMillis());
-                        // start with the first piece of metadata
-                        messageConsumer.accept(UtMetadata.request(0));
-                    }
-                } else if (!requestedAllPeers.contains(peer)) {
-                    requestedAllPeers.add(peer);
-                    // TODO: larger metadata should be handled in more intelligent way
-                    // starting with block #1 because by now we should have already received block #0
-                    for (int i = 1; i < metadata.getBlockCount(); i++) {
-                        messageConsumer.accept(UtMetadata.request(i));
+            break;
+            case REJECTED: {
+                long now = System.currentTimeMillis();
+                if (now - stateContext.rejectedTime >= WAIT_BEFORE_REREQUESTING_AFTER_REJECT.toMillis()) {
+                    messageConsumer.accept(UtMetadata.request(0));
+                    stateContext.requestedFirstTime = now;
+                    stateContext.state = State.REQUESTED_FIRST;
+                }
+            }
+            break;
+            case HAS_METADATA: {
+                IntSet indexes = stateContext.requestedIndexes;
+                while (indexes.size() < MAX_CONCURRENT_INDEX && !blocksNeedRequest.isEmpty() && stateContext.state == State.HAS_METADATA) {
+                    try {
+                        int blockIndex = blocksNeedRequest.dequeueInt();
+                        indexes.add(blockIndex);
+                        messageConsumer.accept(UtMetadata.request(blockIndex));
+                    } catch (NoSuchElementException ignored) {
                     }
                 }
+            }
+            break;
+            default:
+                throw new RuntimeException("unknown state: " + state);
+        }
+
+        if (stateContext.state == State.DISCONNECTED) {
+            IntIterator iterator = stateContext.requestedIndexes.iterator();
+            while (iterator.hasNext()) {
+                blocksNeedRequest.enqueue(iterator.nextInt());
+            }
+        }
+    }
+
+    private void removePeer(Peer peer) {
+        StateContext stateContext = states.get(peer);
+        if (stateContext != null) {
+            stateContext.state = State.DISCONNECTED;
+            IntSet indexes = stateContext.requestedIndexes;
+            IntIterator iterator = indexes.iterator();
+            while (iterator.hasNext()) {
+                blocksNeedRequest.enqueue(iterator.nextInt());
             }
         }
     }
@@ -204,5 +276,29 @@ public class MetadataConsumer {
             }
         }
         return torrent.get();
+    }
+
+    private IntPriorityQueue createBlockIndexQueue(int blockCount) {
+        IntPriorityQueue queue = IntPriorityQueues.synchronize(new IntArrayFIFOQueue());
+        for (int i = 1; i < blockCount; ++i) {
+            queue.enqueue(i);
+        }
+
+        return queue;
+    }
+
+    private enum State {
+        INIT,
+        REQUESTED_FIRST,
+        REJECTED,
+        HAS_METADATA,
+        DISCONNECTED,
+    }
+
+    private static class StateContext {
+        private volatile State state = State.INIT;
+        private long requestedFirstTime = 0;
+        private long rejectedTime = 0;
+        private final IntSet requestedIndexes = IntSets.synchronize(new IntOpenHashSet(MAX_CONCURRENT_INDEX));
     }
 }

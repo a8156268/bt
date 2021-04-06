@@ -141,7 +141,7 @@ public class TorrentProcessorFactory implements ProcessorFactory {
                 torrentRegistry, dataWorker, bufferedPieceRegistry, eventSink, config);
 
         ProcessingStage<MagnetContext> stage1 = new FetchMetadataStage(stage2, metadataService, torrentRegistry,
-                peerRegistry, eventSink, config);
+                peerRegistry, eventSink, eventSource, config);
 
         ProcessingStage<MagnetContext> stage0 = new CreateSessionStage<>(stage1, torrentRegistry, eventSource,
                 connectionSource, messageDispatcher, messagingAgents, config);

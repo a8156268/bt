@@ -36,6 +36,10 @@
             <artifactId>guice-multibindings</artifactId>
             <scope>compile</scope>
         </dependency>
+        <dependency>
+            <groupId>it.unimi.dsi</groupId>
+            <artifactId>fastutil</artifactId>
+        </dependency>
     </dependencies>
 
 </project>

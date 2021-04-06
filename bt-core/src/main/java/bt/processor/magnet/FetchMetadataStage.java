@@ -17,6 +17,7 @@
 package bt.processor.magnet;
 
 import bt.event.EventSink;
+import bt.event.EventSource;
 import bt.metainfo.IMetadataService;
 import bt.metainfo.Torrent;
 import bt.metainfo.TorrentFile;
@@ -25,8 +26,8 @@ import bt.metainfo.TorrentSource;
 import bt.net.InetPeer;
 import bt.peer.IPeerRegistry;
 import bt.processor.ProcessingStage;
-import bt.processor.listener.ProcessingEvent;
 import bt.processor.TerminateOnErrorProcessingStage;
+import bt.processor.listener.ProcessingEvent;
 import bt.runtime.Config;
 import bt.torrent.TorrentDescriptor;
 import bt.torrent.TorrentRegistry;
@@ -44,6 +45,7 @@ public class FetchMetadataStage extends TerminateOnErrorProcessingStage<MagnetCo
     private TorrentRegistry torrentRegistry;
     private IPeerRegistry peerRegistry;
     private EventSink eventSink;
+    private EventSource eventSource;
     private Config config;
 
     public FetchMetadataStage(ProcessingStage<MagnetContext> next,
@@ -51,12 +53,14 @@ public class FetchMetadataStage extends TerminateOnErrorProcessingStage<MagnetCo
                               TorrentRegistry torrentRegistry,
                               IPeerRegistry peerRegistry,
                               EventSink eventSink,
+                              EventSource eventSource,
                               Config config) {
         super(next);
         this.metadataService = metadataService;
         this.torrentRegistry = torrentRegistry;
         this.peerRegistry = peerRegistry;
         this.eventSink = eventSink;
+        this.eventSource = eventSource;
         this.config = config;
     }
 
@@ -64,7 +68,7 @@ public class FetchMetadataStage extends TerminateOnErrorProcessingStage<MagnetCo
     protected void doExecute(MagnetContext context) {
         TorrentId torrentId = context.getMagnetUri().getTorrentId();
 
-        MetadataConsumer metadataConsumer = new MetadataConsumer(metadataService, torrentId, config);
+        MetadataConsumer metadataConsumer = new MetadataConsumer(metadataService, torrentId, config, eventSource);
         context.getRouter().registerMessagingAgent(metadataConsumer);
 
         // need to also receive Bitfields and Haves (without validation for the number of pieces...)
