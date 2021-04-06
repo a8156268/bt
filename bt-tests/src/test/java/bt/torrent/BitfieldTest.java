@@ -67,9 +67,8 @@ public class BitfieldTest extends BaseBitfieldTest {
         assertEquals(8, bitfield.getPiecesNotSkipped());
         assertEquals(5, bitfield.getPiecesRemaining());
 
-        BitSet bitmask = bitfield.getBitmask();
-        assertEquals(3, bitmask.cardinality());
-        assertEquals(8, bitmask.length());
+        assertEquals(3, bitfield.getPiecesComplete());
+        assertEquals(8, bitfield.getPiecesTotal());
 
         assertTrue(bitfield.isComplete(0));
         assertFalse(bitfield.isComplete(1));
@@ -134,9 +133,8 @@ public class BitfieldTest extends BaseBitfieldTest {
         assertEquals(11, bitfield.getPiecesNotSkipped());
         assertEquals(7, bitfield.getPiecesRemaining());
 
-        BitSet bitmask = bitfield.getBitmask();
-        assertEquals(4, bitmask.cardinality());
-        assertEquals(11, bitmask.length());
+        assertEquals(4, bitfield.getPiecesComplete());
+        assertEquals(11, bitfield.getPiecesTotal());
 
         assertTrue(bitfield.isComplete(0));
         assertFalse(bitfield.isComplete(1));

@@ -18,7 +18,6 @@ package bt.data;
 
 import java.nio.ByteBuffer;
 import java.nio.channels.ReadableByteChannel;
-import java.util.BitSet;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -29,7 +28,6 @@ public class DataReaderChannel implements ReadableByteChannel {
 
     private final DataDescriptor dataDescriptor;
     private final Bitfield bitfield;
-    private final BitSet skipped;
     private final long chunkSize;
 
     private int position;
@@ -40,16 +38,14 @@ public class DataReaderChannel implements ReadableByteChannel {
     public DataReaderChannel(DataDescriptor dataDescriptor, long chunkSize) {
         this.dataDescriptor = Objects.requireNonNull(dataDescriptor);
         this.bitfield = dataDescriptor.getBitfield();
-        this.skipped = bitfield.getSkippedBitmask();
         this.chunkSize = chunkSize;
 
         this.remaining = chunkSize;
     }
 
     public void init() {
-        BitSet bitmask = bitfield.getBitmask();
         int limit = 0;
-        while (skipped.get(limit) || bitmask.get(limit)) {
+        while (bitfield.isSkipped(limit) || bitfield.isSet(limit)) {
             limit++;
         }
         this.limit = new AtomicInteger(limit);

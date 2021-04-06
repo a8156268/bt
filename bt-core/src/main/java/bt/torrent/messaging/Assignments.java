@@ -118,9 +118,13 @@ public class Assignments {
         if (!peerBitfieldOptional.isPresent()) {
             return false;
         }
-        BitSet peerBitfield = peerBitfieldOptional.get().getBitmask();
-        BitSet localBitfield = bitfield.getBitmask();
-        peerBitfield.andNot(localBitfield);
-        return peerBitfield.cardinality() > 0;
+        Bitfield peerBitfield = peerBitfieldOptional.get();
+        Bitfield bitfield = this.bitfield;
+        for (int i = 0; i < bitfield.getPiecesTotal(); ++i) {
+            if (!bitfield.isSet(i) && peerBitfield.isSet(i)) {
+                return true;
+            }
+        }
+        return false;
     }
 }

@@ -17,7 +17,6 @@
 package bt.torrent;
 
 import bt.data.Bitfield;
-import bt.data.Bitfield.PieceStatus;
 import bt.net.ConnectionKey;
 
 import java.util.Map;
@@ -58,7 +57,7 @@ public class BitfieldBasedStatistics implements PieceStatistics {
         peerBitfields.put(connectionKey, bitfield);
 
         for (int i = 0; i < pieceTotals.length; i++) {
-            if (bitfield.getPieceStatus(i) == PieceStatus.COMPLETE_VERIFIED) {
+            if (bitfield.isVerified(i)) {
                 incrementPieceTotal(i);
             }
         }
@@ -81,7 +80,7 @@ public class BitfieldBasedStatistics implements PieceStatistics {
         }
 
         for (int i = 0; i < pieceTotals.length; i++) {
-            if (bitfield.getPieceStatus(i) == PieceStatus.COMPLETE_VERIFIED) {
+            if (bitfield.isVerified(i)) {
                 decrementPieceTotal(i);
             }
         }
@@ -118,8 +117,7 @@ public class BitfieldBasedStatistics implements PieceStatistics {
     }
 
     private synchronized void markPieceVerified(Bitfield bitfield, Integer pieceIndex) {
-        if (!bitfield.isVerified(pieceIndex)) {
-            bitfield.markVerified(pieceIndex);
+        if (bitfield.markVerified(pieceIndex)) {
             incrementPieceTotal(pieceIndex);
         }
     }

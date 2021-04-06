@@ -23,11 +23,11 @@ import bt.protocol.Protocols;
 import java.util.BitSet;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Status of torrent's data.
- *
+ * <p>
  * Instances of this class are thread-safe.
  *
  * @since 1.0
@@ -35,6 +35,7 @@ import java.util.concurrent.locks.ReentrantLock;
 public class Bitfield {
 
     // TODO: use EMPTY and PARTIAL instead of INCOMPLETE
+
     /**
      * Status of a particular piece.
      *
@@ -44,30 +45,36 @@ public class Bitfield {
         /*EMPTY, PARTIAL,*/INCOMPLETE, COMPLETE, COMPLETE_VERIFIED
     }
 
-    /**
-     * Bitmask indicating availability of pieces.
-     * If the n-th bit is set, then the n-th piece is complete and verified.
-     */
-    private final BitSet bitmask;
+    private static final int BIT_COUNT = 6;
+
+    private static final int SEGMENT_COUNT = 1 << BIT_COUNT;
+
+    private static final int MASK = SEGMENT_COUNT - 1;
 
     /**
-     * Bitmask indicating pieces that should be skipped.
-     * If the n-th bit is set, then the n-th piece should be skipped.
+     * Bitmask indicating availability of pieces.
+     * If the x-th bit of y-th {@link Segment#bitSet} is set, then the n-th piece is complete and verified.
+     * If the x-th bit of y-th {@link Segment#skipped} is set, then the n-th piece should be skipped.
+     * <p>
+     * x is computed by {@link Bitfield#bitSetPosition(int)}
+     * y is computed by {@link Bitfield#bitSetIndex(int)}
      */
-    private volatile /*nullable*/ BitSet skipped;
+    private final Segment[] segments = new Segment[SEGMENT_COUNT];
 
     /**
      * Total number of pieces in torrent.
      */
     private final int piecesTotal;
 
+    private final AtomicInteger pieceCompleted = new AtomicInteger(0);
+
+    private final AtomicInteger pieceSkipped = new AtomicInteger(0);
+
     /**
      * List of torrent's chunk descriptors.
      * Absent when this Bitfield instance is describing data that some peer has.
      */
     private final Optional<List<ChunkDescriptor>> chunks;
-
-    private final ReentrantLock lock;
 
     /**
      * Creates "local" bitfield from a list of chunk descriptors.
@@ -77,9 +84,8 @@ public class Bitfield {
      */
     public Bitfield(List<ChunkDescriptor> chunks) {
         this.piecesTotal = chunks.size();
-        this.bitmask = new BitSet(chunks.size());
+        initBitMask(this.segments, piecesTotal);
         this.chunks = Optional.of(chunks);
-        this.lock = new ReentrantLock();
     }
 
     /**
@@ -91,19 +97,25 @@ public class Bitfield {
      */
     public Bitfield(int piecesTotal) {
         this.piecesTotal = piecesTotal;
-        this.bitmask = new BitSet(piecesTotal);
+        initBitMask(this.segments, piecesTotal);
         this.chunks = Optional.empty();
-        this.lock = new ReentrantLock();
+    }
+
+    private void initBitMask(Segment[] segments, int piecesTotal) {
+        int segmentSize = (piecesTotal + SEGMENT_COUNT - 1) / SEGMENT_COUNT;
+        for (int i = 0; i < SEGMENT_COUNT; ++i) {
+            segments[i] = new Segment(segmentSize);
+        }
     }
 
     /**
      * Creates bitfield based on a bitmask.
      * Used for creating peers' bitfields.
-     *
+     * <p>
      * Bitmask must be in the format described in BEP-3 (little-endian order of bits).
      *
-     * @param value Bitmask that describes status of all pieces.
-     *              If position i is set to 1, then piece with index i is complete and verified.
+     * @param value       Bitmask that describes status of all pieces.
+     *                    If position i is set to 1, then piece with index i is complete and verified.
      * @param piecesTotal Total number of pieces in torrent.
      * @since 1.0
      * @deprecated since 1.7 in favor of {@link #Bitfield(byte[], BitOrder, int)}
@@ -117,19 +129,19 @@ public class Bitfield {
      * Creates bitfield based on a bitmask.
      * Used for creating peers' bitfields.
      *
-     * @param value Bitmask that describes status of all pieces.
-     *              If position i is set to 1, then piece with index i is complete and verified.
+     * @param value       Bitmask that describes status of all pieces.
+     *                    If position i is set to 1, then piece with index i is complete and verified.
      * @param piecesTotal Total number of pieces in torrent.
      * @since 1.7
      */
     public Bitfield(byte[] value, BitOrder bitOrder, int piecesTotal) {
         this.piecesTotal = piecesTotal;
-        this.bitmask = createBitmask(value, bitOrder, piecesTotal);
+        initBitMask(this.segments, piecesTotal);
+        initBits(value, bitOrder, piecesTotal);
         this.chunks = Optional.empty();
-        this.lock = new ReentrantLock();
     }
 
-    private static BitSet createBitmask(byte[] bytes, BitOrder bitOrder, int piecesTotal) {
+    private void initBits(byte[] bytes, BitOrder bitOrder, int piecesTotal) {
         int expectedBitmaskLength = getBitmaskLength(piecesTotal);
         if (bytes.length != expectedBitmaskLength) {
             throw new IllegalArgumentException("Invalid bitfield: total (" + piecesTotal +
@@ -140,13 +152,11 @@ public class Bitfield {
             bytes = Protocols.reverseBits(bytes);
         }
 
-        BitSet bitmask = new BitSet(piecesTotal);
         for (int i = 0; i < piecesTotal; i++) {
             if (Protocols.isSet(bytes, BitOrder.BIG_ENDIAN, i)) {
-                bitmask.set(i);
+                setBit(i);
             }
         }
-        return bitmask;
     }
 
     private static int getBitmaskLength(int piecesTotal) {
@@ -154,69 +164,21 @@ public class Bitfield {
     }
 
     /**
-     * @return Bitmask that describes status of all pieces.
-     *         If the n-th bit is set, then the n-th piece
-     *         is in {@link PieceStatus#COMPLETE_VERIFIED} status.
-     * @since 1.7
-     */
-    public BitSet getBitmask() {
-        lock.lock();
-        try {
-            return Protocols.copyOf(bitmask);
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    /**
-     *
-     * @return Bitmask of skipped pieces.
-     *         If the n-th bit is set, then the n-th piece
-     *         should be skipped.
-     * @since 1.8
-     */
-    public BitSet getSkippedBitmask() {
-        if (skipped == null) {
-            return new BitSet(getPiecesTotal());
-        }
-
-        lock.lock();
-        try {
-            return Protocols.copyOf(skipped);
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    /**
      * @param bitOrder Order of bits to use to create the byte array
      * @return Bitmask that describes status of all pieces.
-     *         If the n-th bit is set, then the n-th piece
-     *         is in {@link PieceStatus#COMPLETE_VERIFIED} status.
+     * If the n-th bit is set, then the n-th piece
+     * is in {@link PieceStatus#COMPLETE_VERIFIED} status.
      * @since 1.7
      */
     public byte[] toByteArray(BitOrder bitOrder) {
-        byte[] bytes;
-        boolean truncated = false;
+        byte[] bytes = new byte[getBitmaskLength(piecesTotal)];
+        for (int i = 0; i < piecesTotal; ++i) {
+            if (isSet(i)) {
+                Protocols.setBit(bytes, bitOrder, i);
+            }
+        }
+        return bytes;
 
-        lock.lock();
-        try {
-            bytes = bitmask.toByteArray();
-            truncated = (bitmask.length() < piecesTotal);
-        } finally {
-            lock.unlock();
-        }
-
-        if (bitOrder == BitOrder.LITTLE_ENDIAN) {
-            bytes = Protocols.reverseBits(bytes);
-        }
-        if (truncated) {
-            byte[] arr = new byte[getBitmaskLength(piecesTotal)];
-            System.arraycopy(bytes, 0, arr, 0, bytes.length);
-            return arr;
-        } else {
-            return bytes;
-        }
     }
 
     /**
@@ -232,12 +194,7 @@ public class Bitfield {
      * @since 1.0
      */
     public int getPiecesComplete() {
-        lock.lock();
-        try {
-            return bitmask.cardinality();
-        } finally {
-            lock.unlock();
-        }
+        return pieceCompleted.get();
     }
 
     /**
@@ -245,32 +202,16 @@ public class Bitfield {
      * @since 1.7
      */
     public int getPiecesIncomplete() {
-        lock.lock();
-        try {
-            return getPiecesTotal() - bitmask.cardinality();
-        } finally {
-            lock.unlock();
-        }
+        return piecesTotal - pieceCompleted.get();
     }
 
     /**
      * @return Number of pieces that have status different from {@link PieceStatus#COMPLETE_VERIFIED}
-     *         and should NOT be skipped.
+     * and should NOT be skipped.
      * @since 1.0
      */
     public int getPiecesRemaining() {
-        lock.lock();
-        try {
-            if (skipped == null) {
-                return getPiecesTotal() - getPiecesComplete();
-            } else {
-                BitSet bitmask = getBitmask();
-                bitmask.or(skipped);
-                return getPiecesTotal() - bitmask.cardinality();
-            }
-        } finally {
-            lock.unlock();
-        }
+        return getPiecesIncomplete() - getPiecesSkipped();
     }
 
     /**
@@ -278,16 +219,7 @@ public class Bitfield {
      * @since 1.7
      */
     public int getPiecesSkipped() {
-        if (skipped == null) {
-            return 0;
-        }
-
-        lock.lock();
-        try {
-            return skipped.cardinality();
-        } finally {
-            lock.unlock();
-        }
+        return pieceSkipped.get();
     }
 
     /**
@@ -295,16 +227,7 @@ public class Bitfield {
      * @since 1.7
      */
     public int getPiecesNotSkipped() {
-        if (skipped == null) {
-            return piecesTotal;
-        }
-
-        lock.lock();
-        try {
-            return piecesTotal - skipped.cardinality();
-        } finally {
-            lock.unlock();
-        }
+        return piecesTotal - getPiecesSkipped();
     }
 
     /**
@@ -318,15 +241,7 @@ public class Bitfield {
 
         PieceStatus status;
 
-        boolean verified;
-        lock.lock();
-        try {
-            verified = this.bitmask.get(pieceIndex);
-        } finally {
-            lock.unlock();
-        }
-
-        if (verified) {
+        if (isSet(pieceIndex)) {
             status = PieceStatus.COMPLETE_VERIFIED;
         } else if (chunks.isPresent()) {
             ChunkDescriptor chunk = chunks.get().get(pieceIndex);
@@ -340,6 +255,50 @@ public class Bitfield {
         }
 
         return status;
+    }
+
+
+    /**
+     * check if piece status is completed and verified
+     *
+     * @param pieceIndex Piece index (0-based)
+     * @return true if piece is completed and verified
+     * false if piece is not completed nor verified
+     * @since 1.10
+     */
+    public boolean isSet(int pieceIndex) {
+        validatePieceIndex(pieceIndex);
+
+        Segment segment = segments[bitSetIndex(pieceIndex)];
+        int position = bitSetPosition(pieceIndex);
+        synchronized (segment) {
+            return segment.bitSet.get(position);
+        }
+    }
+
+    /**
+     * set piece status to be completed and verified
+     *
+     * @param pieceIndex Piece index (0-based)
+     * @return true if piece is succeed set to be completed and verified
+     * false if piece is already completed and verified
+     * @since 1.10
+     */
+    public boolean setBit(int pieceIndex) {
+        validatePieceIndex(pieceIndex);
+
+        Segment segment = segments[bitSetIndex(pieceIndex)];
+        int position = bitSetPosition(pieceIndex);
+        synchronized (segment) {
+            if (!segment.bitSet.get(position)) {
+                segment.bitSet.set(position);
+                if (segment.skipped == null || !segment.skipped.get(position)) {
+                    pieceCompleted.incrementAndGet();
+                }
+                return true;
+            }
+            return false;
+        }
     }
 
     /**
@@ -362,8 +321,7 @@ public class Bitfield {
      * @since 1.1
      */
     public boolean isVerified(int pieceIndex) {
-        PieceStatus pieceStatus = getPieceStatus(pieceIndex);
-        return pieceStatus == PieceStatus.COMPLETE_VERIFIED;
+        return isSet(pieceIndex);
     }
 
     /**
@@ -373,15 +331,9 @@ public class Bitfield {
      * @see DataDescriptor#getChunkDescriptors()
      * @since 1.0
      */
-    public void markVerified(int pieceIndex) {
+    public boolean markVerified(int pieceIndex) {
         assertChunkComplete(pieceIndex);
-
-        lock.lock();
-        try {
-            bitmask.set(pieceIndex);
-        } finally {
-            lock.unlock();
-        }
+        return setBit(pieceIndex);
     }
 
     private void assertChunkComplete(int pieceIndex) {
@@ -409,14 +361,20 @@ public class Bitfield {
     public void skip(int pieceIndex) {
         validatePieceIndex(pieceIndex);
 
-        lock.lock();
-        try {
-            if (skipped == null) {
-                skipped = new BitSet(getPiecesTotal());
+        Segment segment = segments[bitSetIndex(pieceIndex)];
+        int position = bitSetPosition(pieceIndex);
+        synchronized (segment) {
+            if (segment.skipped == null) {
+                segment.skipped = new BitSet(segment.bitSet.length());
             }
-            skipped.set(pieceIndex);
-        } finally {
-            lock.unlock();
+            if (!segment.skipped.get(position)) {
+                segment.skipped.set(position);
+                // sequence between dec pieceCompleted and inc pieceSkipped is critical
+                if (segment.bitSet.get(position)) {
+                    pieceCompleted.decrementAndGet();
+                }
+                pieceSkipped.incrementAndGet();
+            }
         }
     }
 
@@ -428,13 +386,51 @@ public class Bitfield {
     public void unskip(int pieceIndex) {
         validatePieceIndex(pieceIndex);
 
-        if (skipped != null) {
-            lock.lock();
-            try {
-                skipped.clear(pieceIndex);
-            } finally {
-                lock.unlock();
+        Segment segment = segments[bitSetIndex(pieceIndex)];
+        if (segment.skipped == null) {
+            return;
+        }
+        int position = bitSetPosition(pieceIndex);
+        synchronized (segment) {
+            if (segment.skipped.get(position)) {
+                segment.skipped.set(position, false);
+                // sequence between dec pieceSkipped and inc pieceCompleted is critical
+                pieceSkipped.decrementAndGet();
+                if (segment.bitSet.get(position)) {
+                    pieceCompleted.incrementAndGet();
+                }
             }
         }
+    }
+
+    public boolean isSkipped(int pieceIndex) {
+        validatePieceIndex(pieceIndex);
+
+        Segment segment = segments[bitSetIndex(pieceIndex)];
+        if(segment.skipped == null){
+            return false;
+        }
+
+        int position = bitSetPosition(pieceIndex);
+        synchronized (segment) {
+            return segment.skipped.get(position);
+        }
+    }
+
+    private static int bitSetIndex(int pieceIndex) {
+        return pieceIndex & MASK;
+    }
+
+    private static int bitSetPosition(int pieceIndex) {
+        return pieceIndex >> BIT_COUNT;
+    }
+
+    private static class Segment {
+        public Segment(int size) {
+            this.bitSet = new BitSet(size);
+        }
+
+        BitSet bitSet;
+        volatile BitSet skipped = null;
     }
 }
