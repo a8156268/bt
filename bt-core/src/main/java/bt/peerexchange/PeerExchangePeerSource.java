@@ -18,6 +18,8 @@ package bt.peerexchange;
 
 import bt.net.Peer;
 import bt.peer.PeerSource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Collection;
 import java.util.Collections;
@@ -27,6 +29,8 @@ import java.util.Set;
 import java.util.concurrent.LinkedBlockingQueue;
 
 class PeerExchangePeerSource implements PeerSource {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(PeerExchangePeerSource.class);
 
     private Queue<PeerExchange> messages;
     private volatile Collection<Peer> peers;
@@ -50,21 +54,29 @@ class PeerExchangePeerSource implements PeerSource {
         synchronized (lock) {
             peers = collectPeers(messages);
             hasNewPeers = false;
+            messages.clear();
         }
         return true;
     }
 
     private Collection<Peer> collectPeers(Collection<PeerExchange> messages) {
-        Set<Peer> peers = new HashSet<>();
+        Set<PeerWrapper> peerWrappers = new HashSet<>();
         messages.forEach(message -> {
-            message.getAdded().forEach(peers::add);
-            message.getDropped().forEach(peers::remove);
+            message.getAdded().forEach(peer -> peerWrappers.add(new PeerWrapper(peer)));
+            message.getDropped().forEach(peer -> peerWrappers.remove(new PeerWrapper(peer)));
         });
+
+        Set<Peer> peers = new HashSet<>(peerWrappers.size());
+        peerWrappers.forEach(peerWrapper -> peers.add(peerWrapper.getPeer()));
+
         return peers;
     }
 
     void addMessage(PeerExchange message) {
         synchronized (lock) {
+            if (messages.isEmpty() && message.getAdded().isEmpty()) {
+                return;
+            }
             messages.add(message);
             // according to BEP-11 the same peers can't be dropped in the same message,
             // so it's sufficient to check if list of added peers is not empty

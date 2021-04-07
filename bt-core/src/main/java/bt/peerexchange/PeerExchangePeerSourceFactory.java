@@ -61,6 +61,9 @@ public class PeerExchangePeerSourceFactory implements PeerSourceFactory {
     private Map<TorrentId, PeerExchangePeerSource> peerSources;
 
     private Map<TorrentId, Queue<PeerEvent>> peerEvents;
+
+    private Map<TorrentId, Set<PeerWrapper>> connectedPeers;
+
     private ReentrantReadWriteLock rwLock;
 
     private Set<ConnectionKey> peers;
@@ -78,6 +81,7 @@ public class PeerExchangePeerSourceFactory implements PeerSourceFactory {
                                          Config config) {
         this.peerSources = new ConcurrentHashMap<>();
         this.peerEvents = new ConcurrentHashMap<>();
+        this.connectedPeers = new ConcurrentHashMap<>();
         this.rwLock = new ReentrantReadWriteLock();
         this.peers = ConcurrentHashMap.newKeySet();
         this.lastSentPEXMessage = new ConcurrentHashMap<>();
@@ -90,11 +94,15 @@ public class PeerExchangePeerSourceFactory implements PeerSourceFactory {
         this.maxEventsPerMessage = pexConfig.getMaxEventsPerMessage();
 
         eventSource.onPeerConnected(null, e -> onPeerConnected(e.getConnectionKey()))
-                .onPeerDisconnected(null, e -> onPeerDisconnected(e.getConnectionKey()));
+                .onPeerDisconnected(null, e -> onPeerDisconnected(e.getConnectionKey()))
+                .onTorrentStopped(null, e -> onTorrentStopped(e.getTorrentId()));
 
+        initCleaner(lifecycleBinder, config);
+    }
+
+    private void initCleaner(IRuntimeLifecycleBinder lifecycleBinder, Config config) {
         String threadName = String.format("%d.bt.peerexchange.cleaner", config.getAcceptorPort());
-        ScheduledExecutorService executor =
-                Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, threadName));
+        ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, threadName));
         lifecycleBinder.onStartup("Schedule periodic cleanup of PEX messages", () -> executor.scheduleAtFixedRate(
                 new Cleaner(), CLEANER_INTERVAL.toMillis(), CLEANER_INTERVAL.toMillis(), TimeUnit.MILLISECONDS));
         lifecycleBinder.onShutdown("Shutdown PEX cleanup scheduler", executor::shutdownNow);
@@ -112,16 +120,14 @@ public class PeerExchangePeerSourceFactory implements PeerSourceFactory {
         lastSentPEXMessage.remove(connectionKey);
     }
 
+    private void onTorrentStopped(TorrentId torrentId) {
+        peerSources.remove(torrentId);
+        peerEvents.remove(torrentId);
+        connectedPeers.remove(torrentId);
+    }
+
     private Queue<PeerEvent> getPeerEvents(TorrentId torrentId) {
-        Queue<PeerEvent> events = peerEvents.get(torrentId);
-        if (events == null) {
-            events = new PriorityBlockingQueue<>();
-            Queue<PeerEvent> existing = peerEvents.putIfAbsent(torrentId, events);
-            if (existing != null) {
-                events = existing;
-            }
-        }
-        return events;
+        return peerEvents.computeIfAbsent(torrentId, key -> new PriorityBlockingQueue<>());
     }
 
     @Override
@@ -159,26 +165,30 @@ public class PeerExchangePeerSourceFactory implements PeerSourceFactory {
     @Produces
     public void produce(Consumer<Message> messageConsumer, MessageContext messageContext) {
         ConnectionKey connectionKey = messageContext.getConnectionKey();
+        Peer remotePeer = connectionKey.getPeer();
+        if (remotePeer.isPortUnknown()) {
+            return;
+        }
+
         long currentTime = System.currentTimeMillis();
         long lastSentPEXMessageToPeer = lastSentPEXMessage.getOrDefault(connectionKey, 0L);
 
-        if (peers.contains(connectionKey) && (currentTime - lastSentPEXMessageToPeer) >= minMessageInterval.toMillis()) {
-            List<PeerEvent> events = new ArrayList<>();
-
+        if (peers.contains(connectionKey)
+                && ((currentTime - lastSentPEXMessageToPeer) >= minMessageInterval.toMillis() || lastSentPEXMessageToPeer == 0L)) {
             rwLock.readLock().lock();
+
+            if (lastSentPEXMessageToPeer == 0L) {
+                sendConnectedPeers(messageConsumer, messageContext, remotePeer);
+                lastSentPEXMessage.put(connectionKey, 1L);
+            }
+
+            List<PeerEvent> events = new ArrayList<>();
             try {
                 Queue<PeerEvent> torrentPeerEvents = getPeerEvents(messageContext.getTorrentId());
                 for (PeerEvent event : torrentPeerEvents) {
                     if (event.getInstant() - lastSentPEXMessageToPeer >= 0) {
                         Peer exchangedPeer = event.getPeer();
-                        // don't send PEX message if anything of the above is true:
-                        // - we don't know the listening port of the event's peer yet
-                        // - we don't know the listening port of the current connection's peer yet
-                        // - event's peer and connection's peer are the same
-                        if (!exchangedPeer.isPortUnknown()
-                                && !connectionKey.getPeer().isPortUnknown()
-                                && !exchangedPeer.getInetAddress().equals(connectionKey.getPeer().getInetAddress())
-                                && exchangedPeer.getPort() != connectionKey.getRemotePort()) {
+                        if (shouldSendPexMessage(exchangedPeer, remotePeer)) {
                             events.add(event);
                         }
                     } else {
@@ -216,6 +226,31 @@ public class PeerExchangePeerSourceFactory implements PeerSourceFactory {
         }
     }
 
+    private void sendConnectedPeers(Consumer<Message> messageConsumer, MessageContext messageContext, Peer remotePeer) {
+        Set<PeerWrapper> peers = connectedPeers.get(messageContext.getTorrentId());
+        if (peers == null) {
+            return;
+        }
+        PeerExchange.Builder messageBuilder = PeerExchange.builder();
+        int eventsCount = 0;
+        for (PeerWrapper exchangedPeer : peers) {
+            if (shouldSendPexMessage(exchangedPeer.getPeer(), remotePeer)) {
+                messageBuilder.added(exchangedPeer.getPeer());
+                ++eventsCount;
+                if (eventsCount >= maxEventsPerMessage) {
+                    PeerExchange exchange = messageBuilder.build();
+                    messageConsumer.accept(exchange);
+                    messageBuilder = PeerExchange.builder();
+                    eventsCount = 0;
+                }
+            }
+        }
+        if (eventsCount > 0) {
+            PeerExchange exchange = messageBuilder.build();
+            messageConsumer.accept(exchange);
+        }
+    }
+
     private class Cleaner implements Runnable {
 
         @Override
@@ -230,8 +265,16 @@ public class PeerExchangePeerSourceFactory implements PeerSourceFactory {
                 }
 
                 PeerEvent event;
-                for (Queue<PeerEvent> events : peerEvents.values()) {
+                for (Map.Entry<TorrentId, Queue<PeerEvent>> entry : peerEvents.entrySet()) {
+                    TorrentId torrentId = entry.getKey();
+                    Queue<PeerEvent> events = entry.getValue();
                     while ((event = events.peek()) != null && event.getInstant() <= lruEventTime) {
+                        Set<PeerWrapper> peers = connectedPeers.computeIfAbsent(torrentId, key -> ConcurrentHashMap.newKeySet());
+                        if (event.getType() == PeerEvent.Type.ADDED) {
+                            peers.add(new PeerWrapper(event.getPeer()));
+                        } else if (event.getType() == PeerEvent.Type.DROPPED) {
+                            peers.remove(new PeerWrapper(event.getPeer()));
+                        }
                         events.poll();
                     }
                 }
@@ -244,5 +287,18 @@ public class PeerExchangePeerSourceFactory implements PeerSourceFactory {
                 rwLock.writeLock().unlock();
             }
         }
+
+    }
+
+    // don't send PEX message if anything of the above is true:
+    // - we don't know the listening port of the event's peer yet
+    // - we don't know the listening port of the current connection's peer yet
+    // - event's peer and connection's peer are the same
+    private boolean shouldSendPexMessage(Peer peer, Peer remotePeer) {
+        if (peer.isPortUnknown()) {
+            return false;
+        }
+
+        return !PeerWrapper.equals(peer, remotePeer);
     }
 }
