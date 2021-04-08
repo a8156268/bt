@@ -20,7 +20,13 @@ import bt.protocol.Cancel;
 import bt.protocol.Request;
 import bt.torrent.data.BlockWrite;
 
-import java.util.*;
+import java.util.ArrayDeque;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Queue;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -237,6 +243,18 @@ public class ConnectionState {
         return pendingWrites;
     }
 
+    public Optional<Assignment> getCurrentAssignment() {
+        return assignment;
+    }
+
+    public void setCurrentAssignment(Assignment assignment) {
+        this.assignment = Optional.of(assignment);
+    }
+
+    public void removeAssignment() {
+        this.assignment = Optional.empty();
+    }
+
     /**************************************************/
     // Methods below are not a part of the public API //
     /**************************************************/
@@ -247,17 +265,5 @@ public class ConnectionState {
 
     Queue<Request> getRequestQueue() {
         return requestQueue;
-    }
-
-    Optional<Assignment> getCurrentAssignment() {
-        return assignment;
-    }
-
-    void setCurrentAssignment(Assignment assignment) {
-        this.assignment = Optional.of(assignment);
-    }
-
-    void removeAssignment() {
-        this.assignment = Optional.empty();
     }
 }

@@ -66,7 +66,7 @@ public class RequestProducer {
         }
 
         Assignment assignment = connectionState.getCurrentAssignment().get();
-        Queue<Integer> assignedPieces = assignment.getPieces();
+        Collection<Integer> assignedPieces = assignment.getPieces();
         if (assignedPieces.isEmpty()) {
             resetConnection(connectionState, messageConsumer);
             if (LOGGER.isTraceEnabled()) {

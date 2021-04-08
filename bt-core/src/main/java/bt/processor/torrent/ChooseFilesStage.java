@@ -24,11 +24,11 @@ import bt.processor.ProcessingStage;
 import bt.processor.TerminateOnErrorProcessingStage;
 import bt.processor.listener.ProcessingEvent;
 import bt.runtime.Config;
-import bt.torrent.BitfieldBasedStatistics;
 import bt.torrent.TorrentDescriptor;
 import bt.torrent.TorrentRegistry;
 import bt.torrent.fileselector.TorrentFileSelector;
 import bt.torrent.messaging.Assignments;
+import bt.torrent.messaging.IAssignmentFactory;
 import bt.torrent.selector.IncompletePiecesValidator;
 import bt.torrent.selector.PieceSelector;
 import bt.torrent.selector.ValidatingSelector;
@@ -40,13 +40,16 @@ import java.util.stream.IntStream;
 
 public class ChooseFilesStage<C extends TorrentContext> extends TerminateOnErrorProcessingStage<C> {
     private TorrentRegistry torrentRegistry;
+    private IAssignmentFactory assignmentFactory;
     private Config config;
 
     public ChooseFilesStage(ProcessingStage<C> next,
                             TorrentRegistry torrentRegistry,
+                            IAssignmentFactory assignmentFactory,
                             Config config) {
         super(next);
         this.torrentRegistry = torrentRegistry;
+        this.assignmentFactory = assignmentFactory;
         this.config = config;
     }
 
@@ -70,8 +73,7 @@ public class ChooseFilesStage<C extends TorrentContext> extends TerminateOnError
         Bitfield bitfield = descriptor.getDataDescriptor().getBitfield();
         Set<Integer> validPieces = getValidPieces(descriptor.getDataDescriptor(), selectedFiles);
         PieceSelector selector = createSelector(context.getPieceSelector(), bitfield, validPieces);
-        BitfieldBasedStatistics pieceStatistics = context.getPieceStatistics();
-        Assignments assignments = new Assignments(bitfield, selector, pieceStatistics, config);
+        Assignments assignments = assignmentFactory.createAssignments(context, selector, config);
 
         updateSkippedPieces(bitfield, validPieces);
         context.setAssignments(assignments);

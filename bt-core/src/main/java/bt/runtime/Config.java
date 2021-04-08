@@ -65,9 +65,9 @@ public class Config {
     private int numberOfPeersToRequestFromTracker;
     private int maxOutstandingRequests;
     private int networkBufferSize;
-
     private int dataWorkerCorePoolSize;
     private int dataWorkerMaxPoolSize;
+    private int maxSimultaneouslyAssignedPieces;
 
     private boolean systemGcAfterVerify;
 
@@ -108,11 +108,10 @@ public class Config {
         this.numberOfPeersToRequestFromTracker = 50;
         this.maxOutstandingRequests = 250;
         this.networkBufferSize = 1 * 1024 * 1024; // 1 MB
-
         this.dataWorkerCorePoolSize = 1;
         this.dataWorkerMaxPoolSize = 1;
-
         this.systemGcAfterVerify = true;
+        this.maxSimultaneouslyAssignedPieces = 3;
     }
 
     /**
@@ -154,6 +153,7 @@ public class Config {
         this.maxOutstandingRequests = config.getMaxOutstandingRequests();
         this.networkBufferSize = config.getNetworkBufferSize();
         this.systemGcAfterVerify = config.isSystemGcAfterVerify();
+        this.maxSimultaneouslyAssignedPieces = config.getMaxSimultaneouslyAssignedPieces();
     }
 
     /**
@@ -695,5 +695,21 @@ public class Config {
      */
     public void setSystemGcAfterVerify(boolean systemGcAfterVerify) {
         this.systemGcAfterVerify = systemGcAfterVerify;
+    }
+
+    /**
+     * @since 1.10
+     */
+    public int getMaxSimultaneouslyAssignedPieces() {
+        return maxSimultaneouslyAssignedPieces;
+    }
+
+    /**
+     * @param maxSimultaneouslyAssignedPieces max simultaneously assigned pieces per connection
+     *                                        Increase this value may improve download speed.
+     * @since 1.10
+     */
+    public void setMaxSimultaneouslyAssignedPieces(int maxSimultaneouslyAssignedPieces) {
+        this.maxSimultaneouslyAssignedPieces = maxSimultaneouslyAssignedPieces;
     }
 }

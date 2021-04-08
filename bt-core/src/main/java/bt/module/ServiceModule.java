@@ -46,6 +46,8 @@ import bt.torrent.data.BlockCache;
 import bt.torrent.data.DataWorker;
 import bt.torrent.data.DefaultDataWorker;
 import bt.torrent.data.NoCache;
+import bt.torrent.messaging.DefaultAssignmentFactory;
+import bt.torrent.messaging.IAssignmentFactory;
 import bt.tracker.ITrackerService;
 import bt.tracker.TrackerFactory;
 import bt.tracker.TrackerService;
@@ -155,6 +157,7 @@ public class ServiceModule implements Module {
         binder.bind(IBufferManager.class).to(BufferManager.class).in(Singleton.class);
         binder.bind(IChannelPipelineFactory.class).to(ChannelPipelineFactory.class).in(Singleton.class);
         binder.bind(IBufferedPieceRegistry.class).to(BufferedPieceRegistry.class).in(Singleton.class);
+        binder.bind(IAssignmentFactory.class).to(DefaultAssignmentFactory.class).in(Singleton.class);
 
         // single instance of event bus provides two different injectable services
         binder.bind(EventSink.class).to(EventBus.class).in(Singleton.class);
